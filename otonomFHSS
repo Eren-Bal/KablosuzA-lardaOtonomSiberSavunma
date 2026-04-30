@@ -1,0 +1,339 @@
+import pygame
+import sys
+import math
+import random
+import time
+
+pygame.init()
+WIDTH, HEIGHT = 1200, 800 # Terminal için yüksekliği 800 yaptık
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Otonom WSN Savunma: Self-Healing, Auto-FHSS & Canlı Terminal")
+
+# Renk Paleti
+BG_COLOR = (12, 16, 21)
+PANEL_COLOR = (22, 28, 36)
+TERM_COLOR = (10, 12, 15)
+TEXT_COLOR = (200, 210, 220)
+LINK_COLOR = (12, 16, 21)
+
+CHANNELS = {
+    1: {"ad": "Kanal 1 (2.41 GHz)", "renk": (0, 200, 255)},
+    2: {"ad": "Kanal 2 (2.44 GHz)", "renk": (255, 50, 200)},
+    3: {"ad": "Kanal 3 (2.47 GHz)", "renk": (200, 255, 50)}
+}
+
+aktif_kanal = 1
+jammer_aktif = False
+jammer_pos = (0, 0)
+jammer_yaricap = 180
+jammer_hedef_kanal = 1
+jammer_pulse = 0
+
+# Otonom Mod Değişkenleri
+otonom_mod = True
+tehlike_sayaci = 0
+
+font_baslik = pygame.font.SysFont("Consolas", 22, bold=True)
+font_orta = pygame.font.SysFont("Consolas", 16, bold=True)
+font_kucuk = pygame.font.SysFont("Consolas", 12)
+font_term = pygame.font.SysFont("Consolas", 13)
+
+# İstatistikler ve Grafikler
+istatistik = {"gonderilen": 0, "ulasan": 0, "kayip": 0}
+pdr_gecmisi = [100.0] * 60
+pdr_zamanlayici = 0
+
+# CANLI TERMİNAL (LOG SİSTEMİ)
+sistem_loglari = []
+
+def log_ekle(mesaj, renk=(0, 255, 0)):
+    zaman = time.strftime("%H:%M:%S")
+    sistem_loglari.append((f"[{zaman}] {mesaj}", renk))
+    if len(sistem_loglari) > 9: # Terminalde en fazla 9 satır görünsün
+        sistem_loglari.pop(0)
+
+def mesafe_hesapla(n1, n2):
+    return math.hypot(n1.x - n2.x, n1.y - n2.y)
+
+class Dugum:
+    def __init__(self, id, x, y, is_hub=False):
+        self.id = id
+        self.x = x
+        self.y = y
+        self.is_hub = is_hub
+        self.hedef_dugum = None
+        self.pil = 100.0
+        self.durum = "Aktif"
+
+    def set_hedef(self, hedef):
+        self.hedef_dugum = hedef
+
+    def guncelle(self, tum_dugumler, hub):
+        if self.is_hub or self.durum == "Olu":
+            return
+
+        # Pil Tüketimi Mantığı
+        if jammer_aktif and aktif_kanal == jammer_hedef_kanal:
+            mesafe = mesafe_hesapla(self, type('obj', (object,), {'x': jammer_pos[0], 'y': jammer_pos[1]}))
+            if mesafe <= jammer_yaricap:
+                self.durum = "Jammed"
+                self.pil -= 0.15 # Jammer pili çok hızlı sömürür (Sürekli iletim denemesi)
+            else:
+                self.durum = "Aktif"
+                self.pil -= 0.005
+        else:
+            self.durum = "Aktif"
+            self.pil -= 0.005
+        
+        # Pil bittiyse ölümü kaydet
+        if self.pil <= 0 and self.durum != "Olu":
+            self.pil = 0
+            self.durum = "Olu"
+            log_ekle(f"UYARI: {self.id} pili tükendi! Ağdan koptu.", (255, 100, 100))
+
+        # -----------------------------------------------------------------
+        # PROJENİN ZİRVESİ: SELF-HEALING (KENDİ KENDİNİ ONARAN ROTA)
+        # -----------------------------------------------------------------
+        if self.hedef_dugum and self.hedef_dugum.durum == "Olu":
+            yeni_hedef = hub
+            min_mesafe = mesafe_hesapla(self, hub)
+            
+            # Merkeze benden daha yakın olan, hayattaki en yakın düğümü bul
+            for d in tum_dugumler:
+                if d != self and d.durum == "Aktif":
+                    if mesafe_hesapla(d, hub) < mesafe_hesapla(self, hub):
+                        d_mesafe = mesafe_hesapla(self, d)
+                        if d_mesafe < min_mesafe:
+                            min_mesafe = d_mesafe
+                            yeni_hedef = d
+            
+            self.hedef_dugum = yeni_hedef
+            log_ekle(f"SİSTEM: {self.id} yeniden yönlendirildi -> Yeni Rota: {yeni_hedef.id}", (255, 200, 50))
+
+    def ciz(self, yuzey, renk):
+        if self.is_hub:
+            pygame.draw.rect(yuzey, (80, 255, 80), (self.x-20, self.y-30, 40, 60), border_radius=5)
+            screen.blit(font_orta.render("MERKEZ", True, (80, 255, 80)), (self.x-25, self.y-50))
+            return
+
+        cizim_renk = (50, 50, 50) if self.durum == "Olu" else ((150, 100, 100) if self.durum == "Jammed" else renk)
+        
+        pygame.draw.circle(yuzey, cizim_renk, (self.x, self.y), 12)
+        pygame.draw.circle(yuzey, (255,255,255), (self.x, self.y), 14, 1)
+        screen.blit(font_kucuk.render(self.id, True, (255,255,255)), (self.x-6, self.y-6))
+        
+        # Battery Bar
+        pil_genislik = 24
+        pygame.draw.rect(yuzey, (50,50,50), (self.x - 12, self.y - 22, pil_genislik, 4))
+        if self.pil > 0:
+            pil_renk = (50, 255, 50) if self.pil > 50 else ((255, 200, 50) if self.pil > 20 else (255, 50, 50))
+            pygame.draw.rect(yuzey, pil_renk, (self.x - 12, self.y - 22, (self.pil/100)*pil_genislik, 4))
+
+class Paket:
+    def __init__(self, kaynak, hedef, kanal):
+        self.x = kaynak.x
+        self.y = kaynak.y
+        self.hedef = hedef
+        self.kanal = kanal
+        self.hiz = 4.0
+        self.renk = CHANNELS[kanal]["renk"]
+        self.yok_oldu = False
+        self.merkeze_ulasti = False
+
+    def hareket_et(self):
+        if jammer_aktif and self.kanal == jammer_hedef_kanal:
+            if mesafe_hesapla(self, type('obj', (object,), {'x': jammer_pos[0], 'y': jammer_pos[1]})) <= jammer_yaricap:
+                self.yok_oldu = True
+                istatistik["kayip"] += 1
+                return
+
+        dx = self.hedef.x - self.x
+        dy = self.hedef.y - self.y
+        mesafe = math.hypot(dx, dy)
+        
+        if mesafe < self.hiz:
+            self.x, self.y = self.hedef.x, self.hedef.y
+            if self.hedef.is_hub:
+                self.merkeze_ulasti = True
+                istatistik["ulasan"] += 1
+            elif self.hedef.durum != "Olu":
+                self.hedef = self.hedef.hedef_dugum 
+            else:
+                self.yok_oldu = True 
+                istatistik["kayip"] += 1
+        else:
+            self.x += (dx / mesafe) * self.hiz
+            self.y += (dy / mesafe) * self.hiz
+
+    def ciz(self, yuzey):
+        if not self.yok_oldu:
+            pygame.draw.circle(yuzey, self.renk, (int(self.x), int(self.y)), 5)
+
+# ---------------------------------------------------------
+# GENİŞLETİLMİŞ TOPOLOJİ KURULUMU (16 Düğüm + Hub)
+# ---------------------------------------------------------
+hub = Dugum("HUB", 800, 300, is_hub=True)
+
+# 1. Katman
+d1 = Dugum("D1", 650, 150); d1.set_hedef(hub)
+d2 = Dugum("D2", 650, 300); d2.set_hedef(hub)
+d3 = Dugum("D3", 650, 450); d3.set_hedef(hub)
+
+# 2. Katman
+d4 = Dugum("D4", 500, 100); d4.set_hedef(d1)
+d5 = Dugum("D5", 500, 250); d5.set_hedef(d1)
+d6 = Dugum("D6", 500, 400); d6.set_hedef(d2)
+d7 = Dugum("D7", 500, 550); d7.set_hedef(d3)
+
+# 3. Katman
+d8 = Dugum("D8", 350, 80); d8.set_hedef(d4)
+d9 = Dugum("D9", 350, 200); d9.set_hedef(d5)
+d10 = Dugum("D10", 350, 320); d10.set_hedef(d6)
+d11 = Dugum("D11", 350, 450); d11.set_hedef(d6)
+d12 = Dugum("D12", 350, 580); d12.set_hedef(d7)
+
+# 4. Katman
+d13 = Dugum("D13", 200, 150); d13.set_hedef(d9)
+d14 = Dugum("D14", 200, 300); d14.set_hedef(d10)
+d15 = Dugum("D15", 200, 450); d15.set_hedef(d11)
+d16 = Dugum("D16", 100, 300); d16.set_hedef(d14)
+
+dugumler = [d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13, d14, d15, d16]
+paketler = []
+log_ekle("Sistem Başlatıldı. 16 Düğümlü Mesh Topolojisi Kuruldu.", (0, 255, 255))
+log_ekle("Otonom Savunma Sistemi AKTİF.", (0, 255, 0))
+
+clock = pygame.time.Clock()
+sayac = 0
+
+while True:
+    screen.fill(BG_COLOR)
+    sayac += 1
+    fare_x, fare_y = pygame.mouse.get_pos()
+
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            pygame.quit()
+            sys.exit()
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if event.button == 1 and fare_y < 600 and fare_x < 850:
+                jammer_aktif = not jammer_aktif
+                jammer_pos = (fare_x, fare_y)
+                jammer_hedef_kanal = aktif_kanal
+                if jammer_aktif:
+                    log_ekle("!!! SALDIRI TESPİT EDİLDİ: Sinyal Kesici (Jammer) Devrede !!!", (255, 50, 50))
+                else:
+                    log_ekle("Tehdit Ortadan Kalktı. Jammer Kapatıldı.", (0, 255, 0))
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_f:
+                aktif_kanal = (aktif_kanal % 3) + 1
+                log_ekle(f"MANUEL MÜDAHALE: Frekans atlandı -> {CHANNELS[aktif_kanal]['ad']}", (255, 255, 0))
+            if event.key == pygame.K_o:
+                otonom_mod = not otonom_mod
+                durum = "AÇIK" if otonom_mod else "KAPALI"
+                renk = (0, 255, 0) if otonom_mod else (255, 100, 100)
+                log_ekle(f"SİSTEM: Otonom Savunma Modu {durum}", renk)
+
+    # Ağ Topolojisi
+    for d in dugumler:
+        if d.hedef_dugum and d.durum != "Olu":
+            pygame.draw.line(screen, LINK_COLOR, (d.x, d.y), (d.hedef_dugum.x, d.hedef_dugum.y), 2)
+
+    # Jammer
+    if jammer_aktif:
+        jammer_pulse = (jammer_pulse + 3) % jammer_yaricap
+        s_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        pygame.draw.circle(s_surface, (255, 0, 0, 25), jammer_pos, jammer_yaricap)
+        pygame.draw.circle(s_surface, (255, 0, 0, 120), jammer_pos, jammer_pulse, 2)
+        screen.blit(s_surface, (0, 0))
+        screen.blit(font_baslik.render("JAMMER AKTİF", True, (255, 50, 50)), (jammer_pos[0]-70, jammer_pos[1]-20))
+
+    # Paket Üretimi
+    if sayac % 12 == 0: 
+        secilen = random.choice([d8, d9, d12, d13, d14, d15, d16]) 
+        if secilen.durum == "Aktif":
+            paketler.append(Paket(secilen, secilen.hedef_dugum, aktif_kanal))
+            istatistik["gonderilen"] += 1
+
+    kanal_renk = CHANNELS[aktif_kanal]["renk"]
+    
+    for d in dugumler:
+        d.guncelle(dugumler, hub)
+        d.ciz(screen, kanal_renk)
+    hub.ciz(screen, None)
+
+    yeni_paketler = []
+    for p in paketler:
+        p.hareket_et()
+        p.ciz(screen)
+        if not p.yok_oldu and not p.merkeze_ulasti:
+            yeni_paketler.append(p)
+    paketler = yeni_paketler
+
+    # OTONOM FHSS
+    pdr = (istatistik["ulasan"] / istatistik["gonderilen"] * 100) if istatistik["gonderilen"] > 0 else 100.0
+    
+    if otonom_mod and pdr < 65.0 and jammer_aktif and aktif_kanal == jammer_hedef_kanal:
+        tehlike_sayaci += 1
+        if tehlike_sayaci > 90:
+            aktif_kanal = (aktif_kanal % 3) + 1
+            log_ekle(f"KRİTİK: PDR DÜŞTÜ! OTONOM FHSS DEVREDE -> Kanal {aktif_kanal}'e geçildi.", (255, 50, 255))
+            tehlike_sayaci = 0
+    else:
+        tehlike_sayaci = 0
+
+    pdr_zamanlayici += 1
+    if pdr_zamanlayici >= 60:
+        pdr_gecmisi.append(pdr)
+        pdr_gecmisi.pop(0)
+        pdr_zamanlayici = 0
+
+    # SAĞ PANEL
+    pygame.draw.rect(screen, PANEL_COLOR, (850, 0, 350, 600))
+    pygame.draw.line(screen, (100, 100, 100), (850, 0), (850, 600), 2)
+    screen.blit(font_baslik.render("OTONOM SİBER SAVUNMA", True, TEXT_COLOR), (870, 20))
+    
+    screen.blit(font_orta.render("Ağ Frekans Bandı:", True, (150,150,150)), (870, 70))
+    screen.blit(font_orta.render(CHANNELS[aktif_kanal]["ad"], True, kanal_renk), (1030, 70))
+    
+    mod_renk = (50, 255, 50) if otonom_mod else (255, 100, 100)
+    screen.blit(font_orta.render("Yapay Zeka Savunma:", True, (150,150,150)), (870, 100))
+    screen.blit(font_orta.render("AÇIK" if otonom_mod else "KAPALI", True, mod_renk), (1050, 100))
+
+    pygame.draw.rect(screen, (30, 40, 50), (870, 150, 310, 100), border_radius=8)
+    screen.blit(font_kucuk.render(f"Üretilen Paket: {istatistik['gonderilen']}", True, TEXT_COLOR), (885, 165))
+    screen.blit(font_kucuk.render(f"Ulaşan (Başarılı): {istatistik['ulasan']}", True, (50,255,50)), (885, 190))
+    screen.blit(font_kucuk.render(f"Jamming Kaybı (Drop): {istatistik['kayip']}", True, (255,50,50)), (885, 215))
+
+    # PDR GRAFİĞİ
+    grafik_y = 300
+    pygame.draw.rect(screen, (15, 20, 25), (870, grafik_y, 310, 120))
+    pygame.draw.rect(screen, (100, 100, 100), (870, grafik_y, 310, 120), 1)
+    screen.blit(font_kucuk.render("Canlı PDR Analizi (%)", True, (150,150,150)), (870, grafik_y - 20))
+    
+    noktalar = []
+    for i, deger in enumerate(pdr_gecmisi):
+        x = 870 + (i * (310 / 59))
+        y = (grafik_y + 120) - (deger / 100.0 * 120)
+        noktalar.append((x, y))
+    
+    if len(noktalar) > 1:
+        g_renk = (50, 255, 50) if pdr > 75 else ((255, 200, 50) if pdr > 45 else (255, 50, 50))
+        pygame.draw.lines(screen, g_renk, False, noktalar, 2)
+        screen.blit(font_baslik.render(f"%{pdr:.1f}", True, g_renk), (880, grafik_y + 10))
+
+    # KONTROLLER
+    screen.blit(font_kucuk.render("[Sol Tık]: Jammer Başlat/Kapat", True, TEXT_COLOR), (870, 480))
+    screen.blit(font_kucuk.render("[O Tuşu] : Otonom Savunmayı Aç/Kapat", True, (50, 255, 50)), (870, 510))
+    screen.blit(font_kucuk.render("[F Tuşu] : Manuel Frekans Atla", True, (200, 200, 200)), (870, 540))
+
+    # ALT TERMİNAL
+    pygame.draw.rect(screen, TERM_COLOR, (0, 600, WIDTH, 200))
+    pygame.draw.line(screen, (100, 100, 100), (0, 600), (WIDTH, 600), 2)
+    screen.blit(font_orta.render("SİSTEM TERMİNALİ (LOG)", True, (100, 150, 200)), (10, 610))
+    
+    for i, log in enumerate(sistem_loglari):
+        screen.blit(font_term.render(log[0], True, log[1]), (10, 640 + (i * 18)))
+
+    pygame.display.flip()
+    clock.tick(60)
