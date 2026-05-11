@@ -14,7 +14,7 @@ BG_COLOR = (12, 16, 21)
 PANEL_COLOR = (22, 28, 36)
 TERM_COLOR = (10, 12, 15)
 TEXT_COLOR = (200, 210, 220)
-LINK_COLOR = (12, 16, 21)
+LINK_COLOR = (12, 16, 21) # Link rengini eski haline aldım ki çizgiler görünsün
 
 CHANNELS = {
     1: {"ad": "Kanal 1 (2.41 GHz)", "renk": (0, 200, 255)},
@@ -77,7 +77,7 @@ class Dugum:
             mesafe = mesafe_hesapla(self, type('obj', (object,), {'x': jammer_pos[0], 'y': jammer_pos[1]}))
             if mesafe <= jammer_yaricap:
                 self.durum = "Jammed"
-                self.pil -= 0.15 # Jammer pili çok hızlı sömürür (Sürekli iletim denemesi)
+                self.pil -= 0.15 # Jammer pili çok hızlı sömürür
             else:
                 self.durum = "Aktif"
                 self.pil -= 0.005
@@ -92,9 +92,10 @@ class Dugum:
             log_ekle(f"UYARI: {self.id} pili tükendi! Ağdan koptu.", (255, 100, 100))
 
         # -----------------------------------------------------------------
-        # PROJENİN ZİRVESİ: SELF-HEALING (KENDİ KENDİNİ ONARAN ROTA)
+        # PROJENİN ZİRVESİ: SELF-HEALING (PROAKTİF ROTA ONARIMI)
+        # Hedefteki düğüm ÖLDÜYSE VEYA JAMMER YEDİYSE hemen yeni yol bul!
         # -----------------------------------------------------------------
-        if self.hedef_dugum and self.hedef_dugum.durum == "Olu":
+        if self.hedef_dugum and (self.hedef_dugum.durum == "Olu" or self.hedef_dugum.durum == "Jammed"):
             yeni_hedef = hub
             min_mesafe = mesafe_hesapla(self, hub)
             
@@ -108,7 +109,7 @@ class Dugum:
                             yeni_hedef = d
             
             self.hedef_dugum = yeni_hedef
-            log_ekle(f"SİSTEM: {self.id} yeniden yönlendirildi -> Yeni Rota: {yeni_hedef.id}", (255, 200, 50))
+            log_ekle(f"SİSTEM: {self.id} tehlikeyi fark etti -> Yeni Rota: {yeni_hedef.id}", (255, 200, 50))
 
     def ciz(self, yuzey, renk):
         if self.is_hub:
@@ -156,10 +157,10 @@ class Paket:
             if self.hedef.is_hub:
                 self.merkeze_ulasti = True
                 istatistik["ulasan"] += 1
-            elif self.hedef.durum != "Olu":
+            elif self.hedef.durum == "Aktif": # Hedef düğüm sadece sağlamsa seker
                 self.hedef = self.hedef.hedef_dugum 
             else:
-                self.yok_oldu = True 
+                self.yok_oldu = True # Hedef düğüm ölü veya Jammed ise paket düşer
                 istatistik["kayip"] += 1
         else:
             self.x += (dx / mesafe) * self.hiz
